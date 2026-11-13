@@ -13,6 +13,7 @@ from .demo import seed
 from .documents import Documents
 from .exports import Exporter
 from .imaging import detect_edges, read_image, skew_angle
+from .mono import Monochrome
 from .tasks import Scheduler
 
 
@@ -24,7 +25,8 @@ def create_app(data_root=None, demo=True):
     documents = Documents(store)
     exporter = Exporter(store)
     scheduler = Scheduler(store, documents)
-    app.extensions.update(store=store, documents=documents, exporter=exporter, scheduler=scheduler)
+    monochrome_service = Monochrome(store, documents)
+    app.extensions.update(store=store, documents=documents, exporter=exporter, scheduler=scheduler, mono=monochrome_service)
     if demo:
         seed(store, documents)
 
@@ -182,6 +184,22 @@ def create_app(data_root=None, demo=True):
         page = store.get('pages', identifier)
         variant = choice(request.args.get('variant', 'current'), '图像版本', ('current', 'original', 'thumbnail'))
         return send_file(store.resolve(page[variant]), conditional=True)
+
+    @app.post('/api/pages/<identifier>/mono-preview')
+    def mono_preview(identifier):
+        return jsonify(monochrome_service.preview(identifier, body())), 201
+
+    @app.get('/api/mono/previews/<preview_id>/image')
+    def mono_preview_image(preview_id):
+        return send_file(monochrome_service.preview_image(preview_id), mimetype='image/png', conditional=True)
+
+    @app.post('/api/pages/<identifier>/mono-commit')
+    def mono_commit(identifier):
+        return jsonify(monochrome_service.commit(identifier, body()))
+
+    @app.get('/api/pages/<identifier>/mono')
+    def mono_status(identifier):
+        return jsonify(monochrome_service.status(identifier))
 
     @app.get('/api/pages/<identifier>/edges')
     def edges(identifier):

@@ -24,6 +24,13 @@ class Auditor:
                     references[entry[field]].append({'kind': 'history', 'id': page['id'], 'field': field})
             for region in page.get('regions', []):
                 references[region['path']].append({'kind': 'region', 'id': region['id'], 'page_id': page['id']})
+            mono = page.get('mono')
+            if mono and mono.get('path'):
+                references[mono['path']].append({'kind': 'mono', 'id': page['id'], 'field': 'path'})
+            if mono and mono.get('source'):
+                references[mono['source']].append({'kind': 'mono', 'id': page['id'], 'field': 'source'})
+        for record in state.get('mono_previews', {}).values():
+            references[record['path']].append({'kind': 'mono_preview', 'id': record['id']})
         for record in state.get('exports', {}).values():
             references[record['path']].append({'kind': 'export', 'id': record['id']})
         for record in state.get('backups', {}).values():

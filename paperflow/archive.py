@@ -96,6 +96,17 @@ def validate_document_metadata(metadata, members):
             require(isinstance(result, dict), '识别结果无效')
             string(result.get('text', ''), '识别文本', 500000, True)
             require(isinstance(result.get('boxes'), list) and len(result['boxes']) <= 20000, '识别框无效')
+        mono = page.get('mono')
+        if mono:
+            require(isinstance(mono, dict), '黑白结果记录无效')
+            if mono.get('path'):
+                relative = safe_member(mono['path'])
+                require(relative in members, '归档缺少已确认黑白文件')
+                paths.add(relative)
+            if mono.get('source'):
+                relative = safe_member(mono['source'])
+                require(relative in members, '归档缺少黑白连续源稿')
+                paths.add(relative)
     for source in metadata.get('sources', {}).values():
         relative = safe_member(source.get('path'))
         require(relative in members, '归档缺少上传源文件')
@@ -195,6 +206,12 @@ class Archives:
                     for region in page.get('regions', []):
                         region['id'] = identity('region')
                         region['path'] = staged[region['path']]
+                    mono = page.get('mono')
+                    if mono:
+                        if mono.get('path') and mono['path'] in staged:
+                            mono['path'] = staged[mono['path']]
+                        if mono.get('source') and mono['source'] in staged:
+                            mono['source'] = staged[mono['source']]
                     imported_pages[page['id']] = page
                 document = {
                     'id': new_document_id,
@@ -230,6 +247,12 @@ class Archives:
                     files.update((history['before'], history['after']))
                 for region in page.get('regions', []):
                     files.add(region['path'])
+                mono = page.get('mono')
+                if mono:
+                    if mono.get('path'):
+                        files.add(mono['path'])
+                    if mono.get('source'):
+                        files.add(mono['source'])
             for source in snapshot.get('sources', {}).values():
                 files.add(source['path'])
             for checkpoint in snapshot.get('checkpoints', {}).values():

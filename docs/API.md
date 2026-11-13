@@ -60,7 +60,7 @@ POST /documents/{id}/export
 {"kind":"searchable_pdf","options":{"dpi":150}}
 ```
 
-kind 为images/txt/pdf/searchable_pdf/zip；options 可传page_ids（指定导出顺序）、dpi、image_format、quality、include_originals。结果返回导出id，`GET /exports/{id}/download` 下载；`GET /exports/{id}/verify` 校验。可搜索PDF拒绝缺失或过期OCR。
+kind 为images/txt/pdf/searchable_pdf/zip；options 可传page_ids（指定导出顺序）、dpi、image_format、quality、include_originals。结果返回导出id，`GET /exports/{id}/download` 下载；`GET /exports/{id}/verify` 校验。可搜索PDF拒绝缺失或过期OCR。已确认黑白页的 PDF 内嵌图像为 1 位，图片 ZIP 为 1 位 PNG/TIFF，完整归档 ZIP 附带 mono 引用；不会为凑格式把灰度图写入交付物。
 
 ## 文档编排
 
@@ -74,9 +74,33 @@ kind 为images/txt/pdf/searchable_pdf/zip；options 可传page_ids（指定导�
 - `POST /pages/{id}/split-spread`：axis、ratio、overlap，拆开跨页扫描。
 - `POST /pages/concatenate`：page_ids、target_id、orientation、gap，拼接页面。
 
+## 黑白分区
+
+混合资料（细字、表格线、反白标题、灰阶插图）用 `mono` 操作分区分层渲染，输出只有纯黑与纯白。先预览、核对区域得失，再确认：
+
+```json
+POST /pages/{id}/mono-preview
+{"scale":1,"cell":8,"style":"cluster","assumed_dpi":300,"keep_scale":true,
+ "zones":[{"kind":"illustration","rect":[120,1000,600,440]}]}
+```
+
+返回 `preview_id`、`url`（1 位 PNG）、`signature`、`report`（dimensions、pattern、metrics、warnings、regions、boundary）与 `zones`。`scale` 为输出比例，`cell` 为网点单元像素，`style` 为 cluster/ordered，`assumed_dpi` 用于把网点单元换算成毫米，`keep_scale` 决定缩放时是否保持网点物理尺寸。`zones` 是人工分区纠正：kind 取 text/line/illustration/reverse/blank/auto，rect 用源稿像素坐标。
+
+核对无误后确认：
+
+```json
+POST /pages/{id}/mono-commit
+{"preview_id":"preview_实际ID","scale":1,"cell":8,
+ "zones":[{"kind":"illustration","rect":[120,1000,600,440]}]}
+```
+
+确认时重算签名并与预览一致，否则 409 `preview_stale`；只接受同一份预览对应的结果。确认后页面当前图替换为该 1 位 PNG，页面记录 `mono` 保存连续源稿引用、参数、分区纠正、区域报告、签名和输出哈希；局部提取、下载图片、PDF 与归档 ZIP 都读取这份结果。已确认页再做其他图像处理会返回 409 `mono_committed`，避免把旧黑白结果反复二值化；恢复原图或选择历史中的连续稿版本可回到彩/灰稿，从历史恢复黑白版本会同步恢复其确认状态。
+
+`POST /pages/{id}/process` 也接受 `{"operation":"mono","params":{...}}`，服务端走同一预览/确认渲染管线。`GET /pages/{id}/mono` 返回确认状态、报告与源稿是否仍在。`GET /api/mono/previews/{preview_id}/image` 返回预览 PNG。
+
 ## 区域、历史、快照
 
-`POST /pages/{id}/regions` 参数name、kind（text/illustration/other）、region。返回区域id，下载 `GET /pages/{id}/regions/{region_id}`。`POST /pages/{id}/restore` 参数空对象恢复原图，或传history_id恢复该版本。`GET /pages/{id}` 返回完整图像与OCR历史。
+`POST /pages/{id}/regions` 参数name、kind（text/illustration/other）、region。返回区域id，下载 `GET /pages/{id}/regions/{region_id}`。已确认黑白页的提取保持 1 位 PNG 并记录 `mono.signature`。`POST /pages/{id}/restore` 参数空对象恢复原图，或传history_id恢复该版本。`GET /pages/{id}` 返回完整图像与OCR历史。
 
 `POST /documents/{id}/checkpoints` 保存name命名快照；`GET /documents/{id}/checkpoints` 列表；`GET /checkpoints/{id}/diff` 差异；`POST /checkpoints/{id}/restore` 恢复为新文档（可选name、collection_id）。
 
@@ -143,12 +167,16 @@ kind 为images/txt/pdf/searchable_pdf/zip；options 可传page_ids（指定导�
 | GET | `/api/exports/<identifier>/verify` |
 | GET | `/api/health` |
 | GET | `/api/operations` |
+| GET | `/api/mono/previews/<preview_id>/image` |
 | GET | `/api/pages/<identifier>` |
 | PATCH | `/api/pages/<identifier>` |
 | GET | `/api/pages/<identifier>/edges` |
 | GET | `/api/pages/<identifier>/image` |
+| GET | `/api/pages/<identifier>/mono` |
 | POST | `/api/pages/<identifier>/ocr` |
 | PATCH | `/api/pages/<identifier>/ocr` |
+| POST | `/api/pages/<identifier>/mono-commit` |
+| POST | `/api/pages/<identifier>/mono-preview` |
 | POST | `/api/pages/<identifier>/process` |
 | POST | `/api/pages/<identifier>/regions` |
 | GET | `/api/pages/<identifier>/regions/<region_id>` |

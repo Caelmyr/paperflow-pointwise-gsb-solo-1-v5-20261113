@@ -73,6 +73,32 @@ class Region(Parameter):
         return result
 
 
+class Boolean(Parameter):
+    def validate(self, value, field):
+        require(isinstance(value, bool), field + '必须为布尔值')
+        return value
+
+    def describe(self):
+        result = super().describe()
+        result['type'] = 'boolean'
+        return result
+
+
+class Zones(Parameter):
+    def validate(self, value, field):
+        require(isinstance(value, (list, tuple)) and len(value) <= 200, field + '需要分区列表')
+        result = []
+        for item in value:
+            require(isinstance(item, dict), field + '分区格式无效')
+            result.append({'kind': item.get('kind'), 'rect': item.get('rect')})
+        return result
+
+    def describe(self):
+        result = super().describe()
+        result['type'] = 'zones'
+        return result
+
+
 class Corners(Parameter):
     def validate(self, value, field):
         if value is None:
@@ -135,6 +161,14 @@ def build_registry():
         'threshold': Numeric(0, 255, 160, integer=True),
         'block_size': Numeric(3, 201, 35, integer=True, odd=True),
         'constant': Numeric(-50, 50, 12),
+    })
+    registry['mono'] = Operation('黑白分区渲染', 'color', {
+        'scale': Numeric(0.1, 4, 1),
+        'cell': Numeric(2, 24, 8, integer=True),
+        'style': Enumeration(('cluster', 'ordered'), 'cluster'),
+        'assumed_dpi': Numeric(72, 1200, 300, integer=True),
+        'keep_scale': Boolean(True),
+        'zones': Zones(),
     })
     registry['denoise'] = Operation('清除污点', 'cleanup', {
         'area': Numeric(0, 100, 8, integer=True),

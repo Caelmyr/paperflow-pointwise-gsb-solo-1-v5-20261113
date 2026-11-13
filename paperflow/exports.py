@@ -49,7 +49,12 @@ class Exporter:
                 width = source['width'] * 72 / dpi
                 height = source['height'] * 72 / dpi
                 page = document.new_page(width=width, height=height)
-                page.insert_image(page.rect, filename=str(self.store.resolve(source['current'])))
+                current = self.store.resolve(source['current'])
+                mono = source.get('mono')
+                if mono and mono.get('signature') and self.store.resolve(mono['path']).is_file():
+                    page.insert_image(page.rect, filename=str(self.store.resolve(mono['path'])))
+                else:
+                    page.insert_image(page.rect, filename=str(current))
                 if searchable:
                     result = source.get('ocr')
                     require(result is not None, '可搜索 PDF 要求所有页面先完成 OCR', 409)
@@ -99,10 +104,23 @@ class Exporter:
         buffer = io.BytesIO()
         with zipfile.ZipFile(buffer, 'w', zipfile.ZIP_DEFLATED) as archive:
             for index, page in enumerate(pages):
-                with Image.open(self.store.resolve(page['current'])) as image:
+                mono = page.get('mono')
+                source_path = self.store.resolve(mono['path']) if mono and mono.get('signature') and self.store.resolve(mono['path']).is_file() else self.store.resolve(page['current'])
+                with Image.open(source_path) as image:
                     stream = io.BytesIO()
-                    image = image.convert('RGB')
-                    image.save(stream, format=image_format.upper(), quality=quality)
+                    two_level = bool(mono and mono.get('signature'))
+                    if two_level:
+                        # 已确认的黑白页保持 1 位导出，不重采样成灰度。
+                        image = image.convert('1')
+                        if image_format == 'png':
+                            image.save(stream, format='PNG')
+                        elif image_format == 'tiff':
+                            image.save(stream, format='TIFF', compression='group4')
+                        else:
+                            image.convert('L').save(stream, format='JPEG', quality=quality)
+                    else:
+                        image = image.convert('RGB')
+                        image.save(stream, format=image_format.upper(), quality=quality)
                     extension = 'jpg' if image_format == 'jpeg' else image_format
                     archive.writestr(f'{index + 1:04d}_{safe_name(page["name"])}.{extension}', stream.getvalue())
         return buffer.getvalue()
@@ -125,6 +143,10 @@ class Exporter:
             paths = {source['path'] for source in metadata['sources'].values()}
             for page in pages:
                 paths.update((page['current'], page['thumbnail']))
+                if page.get('mono') and page['mono'].get('path'):
+                    paths.add(page['mono']['path'])
+                if page.get('mono') and page['mono'].get('source'):
+                    paths.add(page['mono']['source'])
                 if include_originals:
                     paths.add(page['original'])
                     for entry in page['history']:

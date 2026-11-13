@@ -12,6 +12,7 @@ import numpy as np
 from PIL import Image, ImageOps
 
 from . import imaging, ocr
+from .mono import is_binary as binary_image, is_active as mono_active, save_binary_crop as _save_binary_crop
 from .core import DomainError, digest, identity, ids, now, number, require, string
 
 MAX_FILE_BYTES = 60 * 1024 * 1024
@@ -160,12 +161,23 @@ class Documents:
         return imported
 
     def apply(self, page_id, operation, params, expected_revision=None):
+        if operation == 'mono':
+            from .parameters import validate_operation
+            params = validate_operation(operation, params)
+            if expected_revision is not None:
+                page = self.store.get('pages', page_id)
+                require(expected_revision == page['revision'], '页面已变化，请刷新后重试', 409, 'revision_conflict')
+            from .mono import Monochrome
+            settings = {key: params[key] for key in ('scale', 'cell', 'style', 'assumed_dpi', 'keep_scale') if key in params}
+            return Monochrome(self.store, self).commit(page_id, {'settings': settings, 'zones': params.get('zones')})
         with self.page_lock(page_id):
             page = self.store.get('pages', page_id)
             if expected_revision is not None:
                 require(expected_revision == page['revision'], '页面已变化，请刷新后重试', 409, 'revision_conflict')
             from .parameters import validate_operation
             params = validate_operation(operation, params)
+            if page.get('mono') and page['mono'].get('signature'):
+                raise DomainError('此页已确认黑白结果，继续处理会把旧结果再次二值化；请先恢复连续稿或从历史回看', 409, 'mono_committed')
             image = imaging.read_image(self.store.resolve(page['current']))
             result, metadata = imaging.process(image, operation, params)
             path = self.store.new_file('processed')
@@ -194,6 +206,8 @@ class Documents:
                 current['quality'] = imaging.quality(result)
                 current['revision'] += 1
                 current['updated_at'] = now()
+                # 图像被其他操作改变后，旧的“已确认黑白结果”不再对应当前图。
+                current['mono'] = None
                 if current['ocr']:
                     current['ocr']['stale'] = True
                 self.store.event(state, '图像处理', page_id, {'operation': operation})
@@ -206,8 +220,10 @@ class Documents:
                 entries = [entry for entry in page['history'] if entry['id'] == history_id]
                 require(bool(entries), '历史版本不存在', 404)
                 target = entries[0]['after']
+                mono_state = copy.deepcopy((entries[0].get('metadata') or {}).get('mono'))
             else:
                 target = page['original']
+                mono_state = None
             image = imaging.read_image(self.store.resolve(target))
             thumb_path = self.store.new_file('thumbs', '.jpg')
             imaging.thumbnail(thumb_path, image)
@@ -231,6 +247,8 @@ class Documents:
                 current['quality'] = imaging.quality(image)
                 current['revision'] += 1
                 current['updated_at'] = now()
+                # 恢复到黑白版本时同步恢复其确认状态；恢复到连续稿则清除旧的黑白记录。
+                current['mono'] = mono_state
                 if current['ocr']:
                     current['ocr']['stale'] = True
                 self.store.event(state, '恢复图像', page_id)
@@ -400,7 +418,11 @@ class Documents:
             image = imaging.read_image(self.store.resolve(page['current']))
             x, y, w, h = imaging.rectangle(values.get('region'), image)
             path = self.store.new_file('regions')
-            imaging.save_image(path, image[y:y + h, x:x + w])
+            if mono_active(page) and binary_image(image):
+                # 从已确认的黑白结果提取，保持 1 位 PNG，不做任何灰度重采样。
+                _save_binary_crop(path, image[y:y + h, x:x + w])
+            else:
+                imaging.save_image(path, image[y:y + h, x:x + w])
             record = {
                 'id': identity('region'),
                 'name': string(values.get('name', '提取区域'), '区域名称', 100),
@@ -410,6 +432,12 @@ class Documents:
                 'image_revision': page['revision'],
                 'created_at': now(),
             }
+            if mono_active(page):
+                record['mono'] = {
+                    'signature': page['mono']['signature'],
+                    'image_revision': page['revision'],
+                    'two_level': True,
+                }
             require(record['kind'] in ('illustration', 'text', 'other'), '区域类型无效')
             with self.store.transaction() as state:
                 state['pages'][page_id]['regions'].append(record)
