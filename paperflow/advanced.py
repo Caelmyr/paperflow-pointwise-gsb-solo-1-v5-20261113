@@ -1,6 +1,9 @@
 from __future__ import annotations
 
-from flask import Blueprint, jsonify, request, send_file
+import io
+import json
+
+from flask import Blueprint, Response, jsonify, request, send_file
 
 from . import analysis, layout
 from .archive import Archives
@@ -358,5 +361,85 @@ def register_advanced(app, store, documents, exporter):
     @routes.get('/documents/<document_id>/export-history')
     def document_export_history(document_id):
         return jsonify(preflight.export_history(document_id))
+
+    from .delivery import (Delivery, FINE_LADDER, GUARANTEES, MAX_DELIVERY_PAGES,
+                           PROTECTION, PROFILE_ORDER)
+    delivery = Delivery(store, exporter)
+    app.extensions['delivery'] = delivery
+
+    @routes.get('/deliveries/options')
+    def delivery_options():
+        return jsonify(
+            profiles=[{'profile': name, 'label': PROTECTION[name]['label'],
+                       'description': PROTECTION[name]['description'],
+                       'thresholds': PROTECTION[name]['thresholds']} for name in PROFILE_ORDER],
+            guarantees=GUARANTEES,
+            quality_ladder=list(FINE_LADDER),
+            chroma_sampling={
+                'guard': '含细彩线的页面自动保持 4:4:4，不靠降低色度采样换容量',
+                '4:4:4': '整批强制 4:4:4',
+            },
+            page_limit=MAX_DELIVERY_PAGES,
+            note='所有候选仍为原像素彩色 JPEG；方案不能漏页、缩小尺寸或转灰度。',
+        )
+
+    @routes.post('/documents/<document_id>/deliveries')
+    def delivery_plan(document_id):
+        values = body()
+        return jsonify(delivery.plan(document_id, values.get('options', {}), values.get('compared_to'))), 201
+
+    @routes.get('/documents/<document_id>/deliveries')
+    def delivery_list(document_id):
+        return jsonify(delivery.list(document_id))
+
+    @routes.get('/deliveries/<identifier>')
+    def delivery_get(identifier):
+        return jsonify(delivery.get(identifier))
+
+    @routes.post('/deliveries/<identifier>/replan')
+    def delivery_replan(identifier):
+        values = body()
+        options = values.get('options')
+        require(options is None or isinstance(options, dict), '调整选项必须为对象')
+        return jsonify(delivery.replan(identifier, options)), 201
+
+    @routes.post('/deliveries/<identifier>/confirm')
+    def delivery_confirm(identifier):
+        return jsonify(delivery.confirm(identifier))
+
+    @routes.get('/deliveries/<identifier>/verify')
+    def delivery_verify(identifier):
+        return jsonify(delivery.verify(identifier))
+
+    @routes.get('/deliveries/<identifier>/download')
+    def delivery_download(identifier):
+        payload, filename = delivery.download(identifier)
+        return send_file(io.BytesIO(payload), mimetype='application/zip',
+                         as_attachment=True, download_name=filename)
+
+    @routes.get('/deliveries/<identifier>/preview')
+    def delivery_preview(identifier):
+        page_id = request.args.get('page_id')
+        require(page_id, '请指定页面')
+        x = request.args.get('x')
+        y = request.args.get('y')
+        x = int(x) if x is not None and x.lstrip('-').isdigit() else None
+        y = int(y) if y is not None and y.lstrip('-').isdigit() else None
+        return jsonify(delivery.preview(identifier, page_id, request.args.get('family', 'page'), x, y))
+
+    @routes.get('/deliveries/<identifier>/preview-image')
+    def delivery_preview_image(identifier):
+        page_id = request.args.get('page_id')
+        require(page_id, '请指定页面')
+        x = request.args.get('x')
+        y = request.args.get('y')
+        payload, window = delivery.preview_image(
+            identifier, page_id, request.args.get('which', 'candidate'),
+            request.args.get('family', 'page'),
+            int(x) if x is not None and x.lstrip('-').isdigit() else None,
+            int(y) if y is not None and y.lstrip('-').isdigit() else None,
+        )
+        return Response(payload, mimetype='image/png',
+                        headers={'X-PaperFlow-Window': json.dumps(window)})
 
     app.register_blueprint(routes)

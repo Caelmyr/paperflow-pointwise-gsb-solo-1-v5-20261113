@@ -7,7 +7,7 @@
     },
     {
       "file": "paperflow/advanced.py",
-      "effective_lines": 282
+      "effective_lines": 353
     },
     {
       "file": "paperflow/analysis.py",
@@ -36,6 +36,10 @@
     {
       "file": "paperflow/core.py",
       "effective_lines": 231
+    },
+    {
+      "file": "paperflow/delivery.py",
+      "effective_lines": 1364
     },
     {
       "file": "paperflow/demo.py",
@@ -110,6 +114,6 @@
       "effective_lines": 34
     }
   ],
-  "total": 5065,
+  "total": 6500,
   "passes_5000": true
 }

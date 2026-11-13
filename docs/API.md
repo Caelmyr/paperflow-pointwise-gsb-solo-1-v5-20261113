@@ -62,6 +62,36 @@ POST /documents/{id}/export
 
 kind 为images/txt/pdf/searchable_pdf/zip；options 可传page_ids（指定导出顺序）、dpi、image_format、quality、include_originals。结果返回导出id，`GET /exports/{id}/download` 下载；`GET /exports/{id}/verify` 校验。可搜索PDF拒绝缺失或过期OCR。
 
+## JPEG 容量交付
+
+旧图片导出对所有页套同一质量值。容量交付按页编码、按页解码测量，再按总容量分配：
+
+```json
+POST /documents/{id}/deliveries
+{"options":{"budget_bytes":1048576,"profile":"balanced","floor_quality":30,"chroma_sampling":"guard"}}
+```
+
+`GET /deliveries/options` 返回保护档位、阈值、质量档位与不可让步项。方案返回 `status`：
+
+- `ready`：可为每页选定不低于保护阈值的编码，整批 JPEG 总量不超预算。
+- `infeasible_protection`：某些页即使最低质量档位也达不到所选保护阈值（`allocation.unsatisfiable_pages` 列出每个失败指标和可换档位）。
+- `infeasible_budget`：整批在保护下限之上的最小容量仍超预算（`allocation.blocked_pages` 逐页列出下限质量、采样、容量与最紧指标；`allocation.alternatives` 列出换档位后的最低容量）。
+
+方案不会漏页、缩小像素或转灰度。`key=allocation.reason` 说明原因，`allocation.steps` 记录实际生效的逐页降档。
+
+```json
+{"options":{"budget_bytes":1048576,"profile":"strict","quality_ladder":"fine",
+  "page_profiles":{"page_实际ID":{"profile":"color","floor_quality":60,"ceiling_quality":96}}}}
+```
+
+`page_profiles` 用页面ID指定每页保护档位、质量底线和上限。`chroma_sampling` 为 `guard`（含细彩线页面自动保持 4:4:4）或 `4:4:4`（整批强制）。
+
+核对：`GET /deliveries/{id}/preview?page_id=…&family=page|text|color|gradient` 返回雷达式窗口与指标；`GET …/preview-image?…&which=source|candidate|difference` 返回 PNG。候选图始终由实际暂存 JPEG 解码得到，`pixel_scale` 为 1.0。`family` 未指定时选该页对应内容的最佳窗口，也可传 `x`、`y` 手动定位。
+
+确认与下载：`POST /deliveries/{id}/confirm` 校验暂存 JPEG 的 SHA-256、字节数、解码尺寸及整批容量后置为已确认；`GET /deliveries/{id}/download` 只打包这些已确认的 JPEG，并再次逐页比对 SHA-256。输入（图像文件、页序、尺寸）变化后方案与确认自动失效，必须重新生成并确认。`GET /deliveries/{id}/verify` 会重新解码并复算所有指标。
+
+调整：`POST /deliveries/{id}/replan` 可带 `options` 覆盖预算/档位/质量底线并返回带 `comparison` 的新方案（`comparison` 列出设置变化、逐页质量与字节变化、缺口变化）。首次比较可用 `POST /documents/{id}/deliveries` 的 `compared_to`。
+
 ## 文档编排
 
 - `POST /documents/{id}/reorder`：page_ids 必须完整且不重复。
@@ -111,6 +141,7 @@ kind 为images/txt/pdf/searchable_pdf/zip；options 可传page_ids（指定导�
 | PATCH | `/api/collections/<identifier>` |
 | DELETE | `/api/collections/<identifier>` |
 | POST | `/api/demo` |
+| POST | `/api/demo/recovery` |
 | POST | `/api/documents` |
 | POST | `/api/documents/<document_id>/blank` |
 | GET | `/api/documents/<document_id>/bookmarks` |
@@ -130,8 +161,18 @@ kind 为images/txt/pdf/searchable_pdf/zip；options 可传page_ids（指定导�
 | GET | `/api/documents/<document_id>/suggest-name` |
 | GET | `/api/documents/<document_id>/text-statistics` |
 | GET | `/api/documents/<identifier>` |
+| GET | `/api/deliveries/options` |
+| GET | `/api/deliveries/<identifier>` |
+| POST | `/api/deliveries/<identifier>/confirm` |
+| GET | `/api/deliveries/<identifier>/verify` |
+| GET | `/api/deliveries/<identifier>/download` |
+| GET | `/api/deliveries/<identifier>/preview` |
+| GET | `/api/deliveries/<identifier>/preview-image` |
+| POST | `/api/deliveries/<identifier>/replan` |
 | PATCH | `/api/documents/<identifier>` |
 | DELETE | `/api/documents/<identifier>` |
+| POST | `/api/documents/<document_id>/deliveries` |
+| GET | `/api/documents/<document_id>/deliveries` |
 | POST | `/api/documents/<identifier>/export` |
 | POST | `/api/documents/<identifier>/import` |
 | POST | `/api/documents/<identifier>/reorder` |
