@@ -4,12 +4,13 @@ import io
 import json
 import re
 import zipfile
-from pathlib import Path
 
 import fitz
 from PIL import Image
 
 from .core import DomainError, choice, identity, now, number, require
+from .fonts import BUNDLED_FONT_ID, FontLibrary
+from .textlayer import TextLayerBuilder, verify_roundtrip
 
 
 def safe_name(value):
@@ -20,6 +21,8 @@ def safe_name(value):
 class Exporter:
     def __init__(self, store):
         self.store = store
+        self.fonts = FontLibrary(store)
+        self.layer_builder = TextLayerBuilder(self.fonts)
 
     def select(self, document_id, page_ids=None):
         state = self.store.snapshot()
@@ -41,10 +44,25 @@ class Exporter:
             chunks.append('\n\n')
         return ''.join(chunks).encode('utf-8-sig')
 
-    def pdf(self, pages, searchable=False, dpi=150):
+    def _resolve_font_ids(self, options):
+        font_ids = options.get('font_ids')
+        if font_ids is None:
+            preference = self.store.snapshot().get('preferences', {}).get('text_layer_fonts')
+            font_ids = preference or [BUNDLED_FONT_ID]
+        require(isinstance(font_ids, list) and 0 < len(font_ids) <= 8, '字体回退链无效（1–8 个字体）')
+        # 提前校验所有字体可加载，失败时直接报错，不产生半成品。
+        for font_id in font_ids:
+            self.fonts.get_record(font_id)
+        return font_ids
+
+    def pdf(self, pages, searchable=False, dpi=150, options=None):
+        options = options or {}
         dpi = number(dpi, 'PDF 分辨率', 72, 600)
+        font_ids = self._resolve_font_ids(options) if searchable else None
         document = fitz.open()
+        plans = []
         try:
+            scale = 72 / dpi
             for source in pages:
                 width = source['width'] * 72 / dpi
                 height = source['height'] * 72 / dpi
@@ -53,45 +71,154 @@ class Exporter:
                 if searchable:
                     result = source.get('ocr')
                     require(result is not None, '可搜索 PDF 要求所有页面先完成 OCR', 409)
-                    require(not result.get('stale'), '页面图像已变化，请更新 OCR 后导出可搜索 PDF', 409)
-                    self.insert_text(page, source, dpi)
+                    require(not result.get('stale'),
+                            '页面图像已变化，请更新 OCR 后导出可搜索 PDF', 409)
+                    plan = self.layer_builder.plan_page(source, font_ids, scale)
+                    plans.append(plan)
+            if searchable:
+                unsupported = [entry for plan in plans for entry in plan.unsupported]
+                if unsupported:
+                    # 缺字体可靠支持的字符：明确阻断，绝不留下宣称完整的成果。
+                    raise DomainError(
+                        self._unsupported_message(unsupported), 422, 'glyph_unsupported')
+                chain = self.fonts.resolve_chain(font_ids)
+                expected_texts = []
+                for source, plan in zip(pages, plans):
+                    expected_texts.append(source['ocr'].get('text', ''))
+                # 整份文档统一子集化嵌入，逐字真实定位并写入自定义 ToUnicode。
+                self.layer_builder.write_document(document, plans, chain)
+                cmap_conflicts = [entry for plan in plans for entry in plan.cmap_conflicts]
+                if cmap_conflicts:
+                    # GID 与码位不能一一对应时，回读文本无法保证忠实，按生成失败处理。
+                    raise DomainError(
+                        '文字层 ToUnicode 映射存在字形冲突，已取消导出：'
+                        + json.dumps(cmap_conflicts[:20], ensure_ascii=False),
+                        500, 'cmap_conflict')
+                verification = verify_roundtrip(document, expected_texts)
+                if not verification['ok']:
+                    raise DomainError(
+                        '文字层回读校验失败，已取消导出：' + json.dumps(verification['failures'],
+                                                                       ensure_ascii=False),
+                        500, 'text_layer_roundtrip_failed')
             document.set_metadata({
                 'title': 'PaperFlow 数字化文档',
                 'author': 'PaperFlow',
                 'creator': 'PaperFlow local document workbench',
                 'subject': '本地离线扫描文档',
             })
-            return document.tobytes(garbage=4, deflate=True)
+            return document.tobytes(garbage=4, deflate=True), plans
         finally:
             document.close()
 
-    def insert_text(self, pdf_page, source, dpi):
-        result = source['ocr']
+    def _unsupported_message(self, unsupported):
+        unique = {}
+        for entry in unsupported:
+            unique.setdefault(entry['codepoint'], entry['character'])
+        samples = '、'.join(f'{ch}（{cp}）' for cp, ch in list(unique.items())[:12])
+        locations = sorted({f"第 {entry['page_id']} 页文字框 {entry['word_id']}"
+                            for entry in unsupported[:30]})
+        detail = '；'.join(locations[:6])
+        return (f'所选字体缺少 {len(unique)} 个字符的可靠字形：{samples}。'
+                f'位置示例：{detail}。请在字体库补充字体或人工核对，'
+                '不会以近似字替换或写入空白字形。')
+
+    def text_layer_preview(self, document_id, options=None):
+        """交付前预览：逐页给出实际写入字符、选取范围、缺字与溢出诊断。"""
+        options = options or {}
+        _, pages = self.select(document_id, options.get('page_ids'))
+        font_ids = self._resolve_font_ids(options)
+        dpi = number(options.get('dpi', 150), 'PDF 分辨率', 72, 600)
         scale = 72 / dpi
-        if result.get('text_override'):
-            lines = result['text'].splitlines() or ['']
-            box = fitz.Rect(12, 12, pdf_page.rect.width - 12, pdf_page.rect.height - 12)
-            font_size = min(11, max(3, box.height / (len(lines) * 1.5)))
-            text = '\n'.join(lines)
-            for _ in range(12):
-                used = pdf_page.insert_textbox(box, text, fontname='china-s', fontsize=font_size, render_mode=3)
-                if used >= 0:
-                    return
-                font_size *= 0.85
-            raise DomainError('人工文本过长，无法完整写入此页文字层；请减少文本或编辑文字框')
-        for word in result['boxes']:
-            text = word['text']
-            if not text:
+        chain = self.fonts.resolve_chain(font_ids)
+        page_reports = []
+        for source in pages:
+            result = source.get('ocr')
+            if not result:
+                page_reports.append({
+                    'page_id': source['id'], 'name': source['name'],
+                    'error': {'code': 'missing_ocr', 'message': '此页尚未识别文字'},
+                    'placements': [], 'unsupported': [], 'overflow': [],
+                })
                 continue
-            x = word['x'] * scale
-            y = word['y'] * scale
-            width = max(word['width'] * scale, 1)
-            height = max(word['height'] * scale, 1)
-            font_size = max(1, height * 0.83)
-            estimated = fitz.get_text_length(text, fontname='china-s', fontsize=font_size)
-            if estimated > width:
-                font_size *= width / estimated
-            pdf_page.insert_text((x, y + height * 0.85), text, fontname='china-s', fontsize=font_size, render_mode=3)
+            if result.get('stale'):
+                page_reports.append({
+                    'page_id': source['id'], 'name': source['name'],
+                    'error': {'code': 'stale_ocr', 'message': 'OCR 已过期，请重新识别后再预览'},
+                    'placements': [], 'unsupported': [], 'overflow': [],
+                })
+                continue
+            plan = self.layer_builder.plan_page(source, font_ids, scale)
+            coverage = self.fonts.coverage(result.get('text', ''), font_ids)
+            page_reports.append({
+                'page_id': source['id'],
+                'name': source['name'],
+                'width': plan.width,
+                'height': plan.height,
+                'placements': [self._placement_payload(item, scale) for item in plan.placements],
+                'unsupported': plan.unsupported,
+                'overflow': plan.overflow,
+                'coverage': coverage,
+                'warnings': plan.warnings,
+            })
+        all_unsupported = [item for report in page_reports for item in report['unsupported']]
+        all_overflow = [item for report in page_reports for item in report['overflow']]
+        return {
+            'document_id': document_id,
+            'dpi': dpi,
+            'scale': scale,
+            'font_chain': [{'font_id': loaded.record['id'], 'font_name': loaded.record['name']}
+                           for loaded in chain],
+            'pages': page_reports,
+            'complete': not all_unsupported,
+            'unsupported_count': len(all_unsupported),
+            'overflow_count': len(all_overflow),
+            'needs_manual_review': bool(all_unsupported or all_overflow),
+            'checked_at': now(),
+        }
+
+    @staticmethod
+    def _placement_payload(placement, scale):
+        x0, y0, x1, y1 = placement.rect
+        return {
+            'word_id': placement.word_id,
+            'text': placement.text,
+            'rect_pdf': [x0, y0, x1, y1],
+            'rect_image': [round(x0 / scale, 2), round(y0 / scale, 2),
+                           round(x1 / scale, 2), round(y1 / scale, 2)],
+            'font_size': round(placement.font_size, 3),
+            'orientation': placement.orientation,
+            'font_id': placement.font_id,
+            'font_name': placement.font_name,
+            'line': placement.line,
+        }
+
+    def preview_image(self, document_id, options=None):
+        """渲染带颜色标注的文字层预览图（原图坐标），返回 PNG 字节与报告。"""
+        from PIL import Image as PILImage, ImageDraw
+        options = options or {}
+        report = self.text_layer_preview(document_id, options)
+        _, pages = self.select(document_id, options.get('page_ids'))
+        page_index = number(options.get('page_index', 0), '预览页码', 0, max(0, len(pages) - 1), True)
+        source = pages[page_index]
+        base = PILImage.open(self.store.resolve(source['current'])).convert('RGBA')
+        overlay = PILImage.new('RGBA', base.size, (0, 0, 0, 0))
+        draw = ImageDraw.Draw(overlay)
+        page_report = report['pages'][page_index]
+        for item in page_report['placements']:
+            x0, y0, x1, y1 = item['rect_image']
+            color = (61, 134, 91, 90) if item['orientation'] == 'h' else (46, 108, 176, 110)
+            draw.rectangle([x0, y0, x1, y1], outline=color[:3] + (220,), width=2,
+                           fill=color)
+        for item in page_report['overflow']:
+            x, y, w, h = item['box_rect']
+            draw.rectangle([x, y, x + w, y + h], outline=(210, 120, 30, 255), width=3)
+        for item in page_report['unsupported']:
+            x, y, w, h = item['box_rect']
+            draw.rectangle([x, y, x + w, y + h], outline=(200, 40, 40, 255), width=4)
+        composed = PILImage.alpha_composite(base, overlay).convert('RGB')
+        buffer = io.BytesIO()
+        composed.save(buffer, format='PNG')
+        return buffer.getvalue(), report, page_report
 
     def image_archive(self, pages, image_format='png', quality=95):
         choice(image_format, '图片格式', ('png', 'jpeg', 'tiff'))
@@ -145,12 +272,30 @@ class Exporter:
         document, pages = self.select(document_id, options.get('page_ids'))
         suffix = '.zip'
         mime = 'application/zip'
+        text_layer_report = None
+        chain = self.fonts.resolve_chain(self._resolve_font_ids(options)) if kind == 'searchable_pdf' else None
         if kind == 'txt':
             data = self.text(pages)
             suffix, mime = '.txt', 'text/plain; charset=utf-8'
         elif kind in ('pdf', 'searchable_pdf'):
-            data = self.pdf(pages, searchable=kind == 'searchable_pdf', dpi=options.get('dpi', 150))
+            data, plans = self.pdf(
+                pages,
+                searchable=kind == 'searchable_pdf',
+                dpi=options.get('dpi', 150),
+                options=options,
+            )
             suffix, mime = '.pdf', 'application/pdf'
+            if kind == 'searchable_pdf':
+                text_layer_report = {
+                    'overflow': [entry for plan in plans for entry in plan.overflow],
+                    'unsupported': [],
+                    'cmap_conflicts': [entry for plan in plans
+                                       for entry in plan.cmap_conflicts],
+                    'font_chain': [
+                        {'font_id': loaded.record['id'], 'font_name': loaded.record['name']}
+                        for loaded in chain
+                    ],
+                }
         elif kind == 'images':
             data = self.image_archive(pages, options.get('image_format', 'png'), options.get('quality', 95))
         else:
@@ -168,7 +313,11 @@ class Exporter:
             'page_ids': [page['id'] for page in pages],
             'created_at': now(),
         }
+        if text_layer_report is not None:
+            record['text_layer'] = text_layer_report
         with self.store.transaction() as state:
             state.setdefault('exports', {})[record['id']] = record
-            self.store.event(state, '导出文档', document_id, {'export_id': record['id'], 'kind': kind})
+            self.store.event(state, '导出文档', document_id,
+                             {'export_id': record['id'], 'kind': kind,
+                              'manual_review': len(text_layer_report['overflow']) if text_layer_report else 0})
         return record

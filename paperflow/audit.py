@@ -112,7 +112,7 @@ class Auditor:
         categories = {}
         total_bytes = 0
         total_files = 0
-        for category in ('sources', 'originals', 'processed', 'thumbs', 'regions', 'exports', 'incoming'):
+        for category in ('sources', 'originals', 'processed', 'thumbs', 'regions', 'exports', 'incoming', 'fonts'):
             directory = self.store.root / category
             files = 0
             size = 0

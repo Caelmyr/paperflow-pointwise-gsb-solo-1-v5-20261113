@@ -94,7 +94,7 @@ class Store:
         self.root.mkdir(parents=True, exist_ok=True)
         self.lock = threading.RLock()
         self.path = self.root / 'workspace.json'
-        for directory in ('originals', 'processed', 'thumbs', 'exports', 'regions', 'incoming'):
+        for directory in ('originals', 'processed', 'thumbs', 'exports', 'regions', 'incoming', 'fonts'):
             (self.root / directory).mkdir(exist_ok=True)
         if not self.path.exists():
             atomic_json(self.path, {

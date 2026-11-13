@@ -62,6 +62,28 @@ POST /documents/{id}/export
 
 kind 为images/txt/pdf/searchable_pdf/zip；options 可传page_ids（指定导出顺序）、dpi、image_format、quality、include_originals。结果返回导出id，`GET /exports/{id}/download` 下载；`GET /exports/{id}/verify` 校验。可搜索PDF拒绝缺失或过期OCR。
 
+### 文字层字体与交付前检查
+
+可搜索 PDF 的文字层使用随项目携带的字体（内置 Noto Sans CJK SC，从 `resources/NotoSansCJK-Regular.ttc` 的 SC 子字体提取）并支持项目字体回退链。所有字体以 Type0/Identity-H 子集嵌入，ToUnicode CMap 由系统自行生成，支持 BMP 与辅助平面（含 U+FFFF 以上生僻字）及组合字符序列，空格回读为 U+0020。
+
+- 文字框字段新增 `orientation`：`h` 横排（默认）或 `v` 竖排；`PATCH /pages/{id}/ocr` 的 boxes 项可同时修改 text 与 orientation。竖排按原框自上而下逐字定位，字号依据框宽；每个字写入独立的不可见文本对象与选取区域，可逐字检索/选取，竖排连续词不作为横向短语匹配（符合原扫描的竖向排列）。
+- TTC 字体上传后默认使用第 0 个子字体；内置 Noto TTC 的简体中文（SC）子字体已在后端按索引 2 预提取，不依赖上传顺序。
+- 字号只由文字框真实尺寸决定，不因框窄而缩小；真实字宽超出原框时在预览与导出记录中标注 `overflow` 人工核对项，不叠字、不挪位。
+- 任何字符在整条字体回退链中都找不到字形时，导出返回 422 `glyph_unsupported` 并附码位与位置，不写入 .notdef、不做近似替换，且不产生导出记录或文件。
+- 导出成功后自动回读校验，提取文本与校订文本逐字不一致时返回 500 `text_layer_roundtrip_failed`，同样不保留成果文件。
+
+```
+GET  /documents/{id}/text-layer/preview?font_ids=...&font_ids=...&dpi=150
+GET  /documents/{id}/text-layer/preview-image?page_index=0&font_ids=...
+GET  /documents/{id}/preflight?font_ids=...
+GET  /fonts
+POST /fonts                      # multipart 上传 TTF/OTF/TTC，存入工作区 fonts/
+DELETE /fonts/{font_id}          # 内置字体不可删除
+POST /fonts/coverage             # {"text":"...","font_ids":[...]} 逐字覆盖诊断
+```
+
+预览返回每页 `placements`（实际写入字符、PDF 点坐标与原图坐标、字号、方向、所用字体）、`unsupported`（缺字码位与文字框位置）与 `overflow`（超出原框的测量值）。`font_ids` 缺省时使用偏好设置 `text_layer_fonts`，再缺省为内置字体；可在 `PATCH /preferences` 中保存默认回退链。
+
 ## 文档编排
 
 - `POST /documents/{id}/reorder`：page_ids 必须完整且不重复。

@@ -94,6 +94,7 @@ def recognize(image, language='chi_sim+eng', psm=3, minimum=0):
             'width': int(data['width'][index]),
             'height': int(data['height'][index]),
             'line': ':'.join(map(str, line_key)),
+            'orientation': 'h',
             'edited': False,
         }
         boxes.append(box)
@@ -130,6 +131,8 @@ def edit_result(current, values):
             seen.add(identifier)
             box = existing[identifier]
             box['text'] = string(change.get('text', ''), '文字框文本', 10000, True)
+            if 'orientation' in change:
+                box['orientation'] = choice(change['orientation'], '文字方向', ('h', 'v'))
             box['edited'] = True
         current['text'] = text_from_boxes(current['boxes'])
     if 'text' in values:

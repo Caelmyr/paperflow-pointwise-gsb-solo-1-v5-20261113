@@ -7,7 +7,7 @@
     },
     {
       "file": "paperflow/advanced.py",
-      "effective_lines": 282
+      "effective_lines": 344
     },
     {
       "file": "paperflow/analysis.py",
@@ -47,11 +47,15 @@
     },
     {
       "file": "paperflow/exports.py",
-      "effective_lines": 160
+      "effective_lines": 300
     },
     {
       "file": "paperflow/filters.py",
       "effective_lines": 183
+    },
+    {
+      "file": "paperflow/fonts.py",
+      "effective_lines": 221
     },
     {
       "file": "paperflow/imaging.py",
@@ -67,7 +71,7 @@
     },
     {
       "file": "paperflow/ocr.py",
-      "effective_lines": 166
+      "effective_lines": 169
     },
     {
       "file": "paperflow/parameters.py",
@@ -79,11 +83,11 @@
     },
     {
       "file": "paperflow/preferences.py",
-      "effective_lines": 99
+      "effective_lines": 107
     },
     {
       "file": "paperflow/preflight.py",
-      "effective_lines": 206
+      "effective_lines": 246
     },
     {
       "file": "paperflow/reports.py",
@@ -102,6 +106,10 @@
       "effective_lines": 146
     },
     {
+      "file": "paperflow/textlayer.py",
+      "effective_lines": 368
+    },
+    {
       "file": "paperflow/web.py",
       "effective_lines": 262
     },
@@ -110,6 +118,6 @@
       "effective_lines": 34
     }
   ],
-  "total": 5065,
+  "total": 5907,
   "passes_5000": true
 }

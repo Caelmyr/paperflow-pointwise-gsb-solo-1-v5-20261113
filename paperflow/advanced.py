@@ -7,6 +7,7 @@ from .archive import Archives
 from .audit import Auditor
 from .catalog import Catalog
 from .core import DomainError, require
+from .fonts import FontLibrary
 from .imaging import read_image
 from .interchange import Interchange
 from .parameters import operation_catalog
@@ -26,7 +27,10 @@ def register_advanced(app, store, documents, exporter):
     preferences = Preferences(store)
     reports = Reports(store, auditor, review)
     interchange = Interchange(store, exporter)
-    app.extensions.update(archives=archives, auditor=auditor, catalog=catalog, review=review, pipelines=pipelines, preferences=preferences, reports=reports, interchange=interchange)
+    font_library = FontLibrary(store)
+    app.extensions.update(archives=archives, auditor=auditor, catalog=catalog, review=review,
+                          pipelines=pipelines, preferences=preferences, reports=reports,
+                          interchange=interchange, font_library=font_library)
 
     def body():
         values = request.get_json(silent=True)
@@ -349,7 +353,10 @@ def register_advanced(app, store, documents, exporter):
 
     @routes.get('/documents/<document_id>/preflight')
     def document_preflight(document_id):
-        return jsonify(preflight.document(document_id, request.args.get('kind', 'searchable_pdf')))
+        font_ids = request.args.getlist('font_ids') or None
+        return jsonify(preflight.document(document_id,
+                                         request.args.get('kind', 'searchable_pdf'),
+                                         font_ids))
 
     @routes.get('/exports/<identifier>/verify')
     def export_verify(identifier):
@@ -358,5 +365,67 @@ def register_advanced(app, store, documents, exporter):
     @routes.get('/documents/<document_id>/export-history')
     def document_export_history(document_id):
         return jsonify(preflight.export_history(document_id))
+
+    # ---------- 字体库与文字层交付前检查 ----------
+    @routes.get('/fonts')
+    def font_list():
+        return jsonify(font_library.list_records())
+
+    @routes.post('/fonts')
+    def font_upload():
+        uploaded = request.files.get('file')
+        require(uploaded is not None, '请选择 TTF / OTF / TTC 字体文件')
+        return jsonify(font_library.upload(uploaded)), 201
+
+    @routes.delete('/fonts/<font_id>')
+    def font_delete(font_id):
+        return jsonify(font_library.delete(font_id))
+
+    @routes.post('/fonts/coverage')
+    def font_coverage():
+        value = body()
+        text = value.get('text', '')
+        require(isinstance(text, str) and text.strip(), '请提供需要检查的文字')
+        font_ids = value.get('font_ids') or []
+        require(isinstance(font_ids, list) and 0 < len(font_ids) <= 8, '字体回退链无效')
+        return jsonify(font_library.coverage(text, font_ids))
+
+    @routes.get('/documents/<document_id>/text-layer/preview')
+    def text_layer_preview(document_id):
+        options = {
+            'page_ids': request.args.getlist('page_ids') or None,
+            'font_ids': request.args.getlist('font_ids') or None,
+        }
+        if options['page_ids'] is None:
+            options.pop('page_ids')
+        if options['font_ids'] is None:
+            options.pop('font_ids')
+        if 'dpi' in request.args:
+            try:
+                options['dpi'] = int(request.args['dpi'])
+            except ValueError:
+                raise DomainError('DPI 必须为整数')
+        return jsonify(exporter.text_layer_preview(document_id, options))
+
+    @routes.get('/documents/<document_id>/text-layer/preview-image')
+    def text_layer_preview_image(document_id):
+        options = {
+            'font_ids': request.args.getlist('font_ids') or None,
+        }
+        if options['font_ids'] is None:
+            options.pop('font_ids')
+        if 'dpi' in request.args:
+            try:
+                options['dpi'] = int(request.args['dpi'])
+            except ValueError:
+                raise DomainError('DPI 必须为整数')
+        if 'page_index' in request.args:
+            try:
+                options['page_index'] = int(request.args['page_index'])
+            except ValueError:
+                raise DomainError('页码必须为非负整数')
+        data, _, _ = exporter.preview_image(document_id, options)
+        from flask import Response
+        return Response(data, mimetype='image/png', headers={'Cache-Control': 'no-store'})
 
     app.register_blueprint(routes)

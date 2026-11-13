@@ -4,7 +4,6 @@ import io
 import json
 import re
 import zipfile
-from pathlib import Path
 
 import fitz
 from PIL import Image
@@ -21,7 +20,7 @@ class Preflight:
         self.store = store
         self.exporter = exporter
 
-    def document(self, document_id, kind='searchable_pdf'):
+    def document(self, document_id, kind='searchable_pdf', font_ids=None):
         document, pages = self.exporter.select(document_id)
         checks = []
         for index, page in enumerate(pages):
@@ -53,6 +52,24 @@ class Preflight:
                 'issues': issues,
                 'ready': not any(not issue.get('warning') for issue in issues),
             })
+        text_layer = None
+        if kind == 'searchable_pdf' and all(check['ready'] for check in checks):
+            options = {'font_ids': font_ids} if font_ids else {}
+            text_layer = self.exporter.text_layer_preview(document_id, options)
+            for page_report in text_layer['pages']:
+                check = next(item for item in checks if item['page_id'] == page_report['page_id'])
+                for entry in page_report['unsupported']:
+                    check['issues'].append({
+                        'code': 'glyph_unsupported',
+                        'message': f"字符 {entry['character']}（{entry['codepoint']}）缺少可靠字形",
+                    })
+                    check['ready'] = False
+                for entry in page_report['overflow']:
+                    check['issues'].append({
+                        'code': 'text_overflow',
+                        'warning': True,
+                        'message': f"文字框 {entry['word_id']} 真实字宽超出原框，需人工核对选取范围",
+                    })
         return {
             'document_id': document_id,
             'kind': kind,
@@ -60,6 +77,7 @@ class Preflight:
             'page_count': len(pages),
             'ready': all(check['ready'] for check in checks),
             'pages': checks,
+            'text_layer': text_layer,
         }
 
     def export(self, export_id):
@@ -121,15 +139,23 @@ class Preflight:
                     if expected and not actual:
                         errors.append(f'第{index + 1}页文字层为空')
                     if expected and actual:
-                        hits = sum(character in actual for character in expected)
-                        coverage = hits / len(expected)
-                        item['character_coverage'] = round(coverage, 4)
-                        if coverage < 0.9:
-                            warnings.append(f'第{index + 1}页文字层与当前 OCR 差异较大，可能在导出后修改了文字')
+                        # 逐字精确比对：确认后的 PDF 必须原样复制已校订文字。
+                        if expected != actual:
+                            difference = self._first_difference(expected, actual)
+                            errors.append(
+                                f'第{index + 1}页文字层与校订文本不一致：'
+                                f"位置 {difference['index']}，期望 {difference.get('expected') or '（无）'}，"
+                                f"实际 {difference.get('actual') or '（无）'}")
+                        item['character_coverage'] = round(
+                            sum(character in actual for character in expected) / len(expected), 4)
+                    item['embedded_fonts'] = [
+                        {'name': font[3], 'resource': font[4], 'encoding': font[5]}
+                        for font in pdf_page.get_fonts(full=True)
+                    ]
                     sample = source['ocr']['text'].split()
                     searchable = []
                     for word in sample:
-                        if len(word) < 3:
+                        if len(word) < 2:
                             continue
                         matches = pdf_page.search_for(word)
                         if matches:
@@ -137,10 +163,25 @@ class Preflight:
                         if len(searchable) >= 5:
                             break
                     item['search_samples'] = searchable
+                if record.get('text_layer', {}).get('overflow'):
+                    overflow = [entry for entry in record['text_layer']['overflow']
+                                if entry['page_id'] == page_id]
+                    if overflow:
+                        warnings.append(
+                            f'第{index + 1}页有 {len(overflow)} 处文字超出原文字框，已在导出记录中标注人工核对')
                 pages.append(item)
             return {'page_count': len(document), 'pages': pages}
         finally:
             document.close()
+
+    @staticmethod
+    def _first_difference(expected, actual):
+        for index, (a, b) in enumerate(zip(expected, actual)):
+            if a != b:
+                return {'index': index, 'expected': a, 'actual': b}
+        return {'index': min(len(expected), len(actual)),
+                'expected': expected[len(actual):len(actual) + 1] or None,
+                'actual': actual[len(expected):len(expected) + 1] or None}
 
     def archive(self, path, record, state, errors, warnings):
         details = {}

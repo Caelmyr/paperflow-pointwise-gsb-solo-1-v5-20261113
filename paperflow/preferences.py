@@ -22,6 +22,7 @@ class Preferences:
             'thumbnail_size': 240,
             'reviewer': '本机用户',
             'preserve_ocr_versions': 20,
+            'text_layer_fonts': ['font_bundled_noto_sans_cjk_sc'],
         }
 
     def get(self):
@@ -55,6 +56,13 @@ class Preferences:
                 result[key] = string(value, '审核人', 80)
             elif key == 'preserve_ocr_versions':
                 result[key] = number(value, 'OCR 版本数', 1, 100, True)
+            elif key == 'text_layer_fonts':
+                require(isinstance(value, list) and 0 < len(value) <= 8, '文字层字体回退链必须包含1–8个字体')
+                require(all(isinstance(item, str) for item in value), '字体标识无效')
+                from .fonts import BUNDLED_FONT_ID
+                available = {BUNDLED_FONT_ID, *self.store.snapshot().get('fonts', {})}
+                require(all(item in available for item in value), '字体回退链包含不存在的字体')
+                result[key] = value
         with self.store.transaction() as state:
             state['preferences'] = result
             self.store.event(state, '修改用户设置', 'workspace', {'fields': list(values)})
